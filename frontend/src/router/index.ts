@@ -1,6 +1,6 @@
 /**
- * 路由表（与提示词逐字一致）
- * /books、/books/:id/leaves、/papers、/repairs、/export
+ * 路由表
+ * /books、/books/:id/leaves、/papers、/repairs、/storage（库房 × 修复室往来账）、/export
  */
 import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router'
 
@@ -32,6 +32,12 @@ const routes: RouteRecordRaw[] = [
     name: 'repair-workflow',
     component: () => import('@/pages/RepairWorkflow.vue'),
     meta: { title: '修复工序记录', icon: 'Tools' }
+  },
+  {
+    path: '/storage',
+    name: 'warehouse-ledger',
+    component: () => import('@/pages/WarehouseLedger.vue'),
+    meta: { title: '书库 × 修复室往来账', icon: 'Box' }
   },
   {
     path: '/export',

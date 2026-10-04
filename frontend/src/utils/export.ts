@@ -8,12 +8,15 @@ import type { Leaf } from '@/types/leaf'
 import type { Paper } from '@/types/paper'
 import type { RepairOrder } from '@/types/repairOrder'
 import type { Binding } from '@/types/binding'
+import type { StorageCase } from '@/types/storageCase'
+import type { RepairTicket } from '@/types/repairTicket'
 import { BOOK_LEVEL_LABEL } from '@/types/book'
 import { BINDING_TYPE_LABEL, VOLUME_STATE_LABEL } from '@/types/volume'
 import { DAMAGE_TYPE_LABEL, LEAF_STATE_LABEL } from '@/types/leaf'
 import { PAPER_TYPE_LABEL, deltaELevel } from '@/types/paper'
 import { REPAIR_NAME_LABEL } from '@/types/repairOrder'
 import { BINDING_VERDICT_LABEL } from '@/types/binding'
+import { TICKET_STATUS_LABEL } from '@/types/repairTicket'
 import type { RestoreSnapshot } from './db'
 
 /** 触发浏览器下载 */
@@ -55,6 +58,8 @@ export interface ExportContext {
   papers: Paper[]
   repairOrders: RepairOrder[]
   bindings: Binding[]
+  storageCases: StorageCase[]
+  repairTickets: RepairTicket[]
 }
 
 /** 验收归档清单文本：按古籍 → 册次 → 书叶 → 工序展开 */
@@ -66,6 +71,14 @@ export function buildArchiveReport(context: ExportContext): string {
   }
   context.books.forEach((book, bookIndex) => {
     lines.push(`${bookIndex + 1}. 《${book.title}》　${book.edition}　${book.era}　${BOOK_LEVEL_LABEL[book.level]}　收藏号 ${book.collectionNo || '未编'}`)
+    const storageCase = context.storageCases.find((item) => item.bookId === book.id)
+    if (storageCase) {
+      lines.push(
+        `   函 ${storageCase.caseNo}　架位 ${storageCase.shelfNo || '待补编'}　格位容量 ${storageCase.capacity}　在库 ${storageCase.onShelfCount} 册${
+          storageCase.waitQueue.length > 0 ? `　候位 ${storageCase.waitQueue.length} 册` : ''
+        }${storageCase.historicalBackfill ? '　（容量按现有册数历史回填）' : ''}`
+      )
+    }
     const volumes = context.volumes.filter((volume) => volume.bookId === book.id)
     if (volumes.length === 0) lines.push('   （暂无册次）')
     volumes.forEach((volume) => {
@@ -84,6 +97,14 @@ export function buildArchiveReport(context: ExportContext): string {
             : '尚未装订'
         }`
       )
+      const ticket = context.repairTickets.find((item) => item.volumeId === volume.id)
+      if (ticket) {
+        lines.push(
+          `      库房往来：${TICKET_STATUS_LABEL[ticket.status]}　工位 ${ticket.station || '未记'}　领于 ${ticket.lentDate}　拆叶 ${ticket.detachedLeaves}　还回 ${ticket.returnedCount} 册${
+            ticket.returnedDate ? `（${ticket.returnedDate}）` : ''
+          }${ticket.restatedAt ? '　※ 工位已按本侧重报' : ''}`
+        )
+      }
       leaves.forEach((leaf) => {
         const orders = context.repairOrders.filter((order) => order.leafId === leaf.id)
         const done = orders.filter((order) => order.state === 'done').length
