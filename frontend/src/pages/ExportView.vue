@@ -14,6 +14,8 @@ import { useLeafStats } from '@/hooks/useLeafStats'
 import { useBookStore } from '@/stores/bookStore'
 import { useLeafStore } from '@/stores/leafStore'
 import { useRepairStore } from '@/stores/repairStore'
+import { useWarehouseStore } from '@/stores/warehouseStore'
+import { useWorkshopStore } from '@/stores/workshopStore'
 import {
   BINDING_METHOD_OPTIONS,
   BINDING_VERDICT_COLOR,
@@ -48,6 +50,8 @@ import {
 const bookStore = useBookStore()
 const leafStore = useLeafStore()
 const repairStore = useRepairStore()
+const warehouseStore = useWarehouseStore()
+const workshopStore = useWorkshopStore()
 const { totals } = useLeafStats()
 const bindingTable = useIdbTable<Binding>((database) => database.bindings, { sortByUpdatedAt: false })
 const paperTable = useIdbTable<Paper>((database) => database.papers, { sortByUpdatedAt: false })
@@ -208,7 +212,14 @@ async function handleFile(event: Event): Promise<void> {
     return
   }
   await importSnapshot(parsed as RestoreSnapshot)
-  await Promise.all([bookStore.loadBooks(), bookStore.loadVolumes(), leafStore.loadLeaves(), repairStore.loadOrders()])
+  await Promise.all([
+    bookStore.loadBooks(),
+    bookStore.loadVolumes(),
+    leafStore.loadLeaves(),
+    repairStore.loadOrders(),
+    warehouseStore.loadAll(),
+    workshopStore.loadOrders()
+  ])
   ElMessage.success('导入完成，数据已覆盖')
 }
 
@@ -223,7 +234,14 @@ async function handleReset(): Promise<void> {
     return
   }
   await resetDatabase()
-  await Promise.all([bookStore.loadBooks(), bookStore.loadVolumes(), leafStore.loadLeaves(), repairStore.loadOrders()])
+  await Promise.all([
+    bookStore.loadBooks(),
+    bookStore.loadVolumes(),
+    leafStore.loadLeaves(),
+    repairStore.loadOrders(),
+    warehouseStore.loadAll(),
+    workshopStore.loadOrders()
+  ])
   ElMessage.success('已清空并重新载入演示数据')
 }
 
@@ -328,7 +346,7 @@ function verdictColor(verdict: string): string {
         <el-card shadow="never" style="margin-top: 16px">
           <template #header>整库导出</template>
           <p class="gb-muted">
-            导出文件包含 6 张业务表全量数据与结构版本号，可在其他设备通过「导入 JSON」还原。
+            导出文件包含 10 张业务表全量数据与结构版本号，可在其他设备通过「导入 JSON」还原；旧版备份缺少函台账时，导入会按函现有的册数回填历史格位。
           </p>
           <div class="gb-toolbar">
             <el-button :icon="Download" @click="handleExport">JSON 备份</el-button>

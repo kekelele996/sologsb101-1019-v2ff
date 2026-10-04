@@ -1,6 +1,6 @@
 /**
- * 路由表（与提示词逐字一致）
- * /books、/books/:id/leaves、/papers、/repairs、/export
+ * 路由表
+ * /books、/books/:id/leaves、/warehouse、/workshop、/papers、/repairs、/export
  */
 import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router'
 
@@ -20,6 +20,18 @@ const routes: RouteRecordRaw[] = [
     name: 'leaf-board',
     component: () => import('@/pages/LeafBoard.vue'),
     meta: { title: '书叶破损登记', icon: 'Document' }
+  },
+  {
+    path: '/warehouse',
+    name: 'warehouse-view',
+    component: () => import('@/pages/WarehouseView.vue'),
+    meta: { title: '库房架位台账', icon: 'Box' }
+  },
+  {
+    path: '/workshop',
+    name: 'workshop-view',
+    component: () => import('@/pages/WorkshopView.vue'),
+    meta: { title: '修复室工单', icon: 'Tickets' }
   },
   {
     path: '/papers',

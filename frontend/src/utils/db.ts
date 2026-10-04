@@ -1,7 +1,8 @@
 /**
  * IndexedDB 持久化层（Dexie 封装）
- * - 数据结构版本号与升级迁移逻辑（v1 → v2：Paper 增加 dyeRecipe 字段并按纸种回填默认配方）
- * - 六张业务表的增删改查与整库导入导出
+ * - 数据结构版本号与升级迁移逻辑（v1 → v2：Paper 增加 dyeRecipe 字段并按纸种回填默认配方；
+ *   v2 → v3：新增函 / 出库请求 / 修复工单 / 对账重报四表，旧数据按函现有的册数回填历史格位容量）
+ * - 十张业务表的增删改查与整库导入导出
  * - 首次打开自动播种三层互相引用的演示数据（幂等）
  * 纯前端应用：不依赖任何后端服务或数据库。
  */
@@ -12,12 +13,16 @@ import type { Leaf } from '@/types/leaf'
 import { DEFAULT_DYE_RECIPE, type Paper } from '@/types/paper'
 import type { RepairOrder } from '@/types/repairOrder'
 import type { Binding } from '@/types/binding'
+import type { CaseShelf } from '@/types/caseShelf'
+import type { CheckoutRequest } from '@/types/checkout'
+import type { WorkOrder } from '@/types/workOrder'
+import type { ReconReport } from '@/types/reconReport'
 
 /** 数据库名（README 与导出文件均使用该名称） */
 export const DB_NAME = 'gbbookrestore'
 
 /** 当前数据结构版本号 */
-export const DB_VERSION = 2
+export const DB_VERSION = 3
 
 /** localStorage 侧少量元数据键 */
 export const LS_KEYS = {
@@ -88,6 +93,10 @@ export class BookRestoreDatabase extends Dexie {
   papers!: Table<Paper, string>
   repairOrders!: Table<RepairOrder, string>
   bindings!: Table<Binding, string>
+  caseShelves!: Table<CaseShelf, string>
+  checkoutRequests!: Table<CheckoutRequest, string>
+  workOrders!: Table<WorkOrder, string>
+  reconReports!: Table<ReconReport, string>
 
   constructor() {
     super(DB_NAME)
@@ -101,7 +110,7 @@ export class BookRestoreDatabase extends Dexie {
       bindings: 'id, volumeId, verdict, finishDate, updatedAt'
     })
     // v2：Paper 增加 dyeRecipe 字段，按纸种为历史记录回填默认配方
-    this.version(DB_VERSION)
+    this.version(2)
       .stores({
         books: 'id, title, era, level, collectionNo, updatedAt',
         volumes: 'id, bookId, volumeNo, bindingType, state, updatedAt',
@@ -122,6 +131,37 @@ export class BookRestoreDatabase extends Dexie {
             if (typeof paper.thicknessMm !== 'number') paper.thicknessMm = 0.06
           })
       })
+    // v3：库房 / 修复室两本账（函、出库请求、修复工单、对账重报）；
+    // 旧数据里函还没记格位容量，升级时按函现有的册数回填一份历史格位
+    this.version(DB_VERSION)
+      .stores({
+        books: 'id, title, era, level, collectionNo, updatedAt',
+        volumes: 'id, bookId, volumeNo, bindingType, state, updatedAt',
+        leaves: 'id, volumeId, leafNo, damageType, phValue, state, updatedAt',
+        papers: 'id, leafId, paperType, laidPattern, deltaE, updatedAt',
+        repairOrders: 'id, leafId, seq, name, operator, state, updatedAt',
+        bindings: 'id, volumeId, method, verdict, finishDate, updatedAt',
+        caseShelves: 'id, caseNo, bookId, updatedAt',
+        checkoutRequests: 'id, caseId, state, updatedAt',
+        workOrders: 'id, caseId, state, updatedAt',
+        reconReports: 'id, caseId, updatedAt'
+      })
+      .upgrade(async (tx) => {
+        const books = await tx.table<Book>('books').toArray()
+        const volumes = await tx.table<Volume>('volumes').toArray()
+        const legacy = buildLegacyCaseShelves(books, volumes)
+        if (legacy.length > 0) await tx.table('caseShelves').bulkPut(legacy)
+        // 兜底：已有函但格位容量缺失的，按函现有的册数回填
+        await tx
+          .table<CaseShelf>('caseShelves')
+          .toCollection()
+          .modify((row) => {
+            if (typeof row.slotCapacity !== 'number' || row.slotCapacity <= 0) {
+              row.slotCapacity = typeof row.inStockCount === 'number' ? row.inStockCount : 0
+            }
+            if (typeof row.inStockCount !== 'number') row.inStockCount = row.slotCapacity
+          })
+      })
   }
 }
 
@@ -131,6 +171,26 @@ export const db = new BookRestoreDatabase()
 export function createId(prefix: string): string {
   const rand = Math.random().toString(36).slice(2, 8)
   return `${prefix}_${Date.now().toString(36)}${rand}`
+}
+
+/**
+ * 历史格位回填：旧数据（含旧版备份）里函还没记格位容量，
+ * 按每部古籍现有的册数生成一函，格位容量与在库册数都先记为现有册数。
+ */
+export function buildLegacyCaseShelves(books: Book[], volumes: Volume[], now = Date.now()): CaseShelf[] {
+  return books.map((book, index) => {
+    const count = volumes.filter((volume) => volume.bookId === book.id).length
+    return {
+      id: `case_legacy_${book.id}`,
+      caseNo: `函补-${String(index + 1).padStart(2, '0')}`,
+      bookId: book.id,
+      shelfLocation: '旧库未排架',
+      slotCapacity: count,
+      inStockCount: count,
+      createdAt: now,
+      updatedAt: now
+    }
+  })
 }
 
 /** 打开数据库并在首次使用时播种演示数据（幂等） */
@@ -230,9 +290,27 @@ export async function seedDatabase(): Promise<void> {
     { id: 'bind_0101', volumeId: 'vol_0101', method: '四眼线装', finishDate: '2026-03-10', verdict: 'rework', inspector: '程砚', createdAt: now - day * 2, updatedAt: now - day * 2 }
   ]
 
+  // 库房账：函上记架位、格位容量与当前在库册数
+  const caseShelves: CaseShelf[] = [
+    { id: 'case_01', caseNo: '函甲-01', bookId: 'book_01', shelfLocation: '甲字架 3 层 2 格', slotCapacity: 2, inStockCount: 1, createdAt: now - day * 38, updatedAt: now - day * 5 },
+    { id: 'case_02', caseNo: '函甲-02', bookId: 'book_02', shelfLocation: '甲字架 4 层 1 格', slotCapacity: 1, inStockCount: 1, createdAt: now - day * 30, updatedAt: now - day * 2 },
+    { id: 'case_03', caseNo: '函乙-01', bookId: 'book_03', shelfLocation: '乙字架 1 层 4 格', slotCapacity: 1, inStockCount: 1, createdAt: now - day * 55, updatedAt: now - day * 5 }
+  ]
+
+  // 出库请求：chk_01 已出库；chk_02 申请 2 册但函甲-01 在库不足，排队等还回腾格
+  const checkoutRequests: CheckoutRequest[] = [
+    { id: 'chk_01', caseId: 'case_01', count: 1, state: 'fulfilled', workOrderId: 'wo_01', createdAt: now - day * 5, updatedAt: now - day * 5 },
+    { id: 'chk_02', caseId: 'case_01', count: 2, state: 'queued', workOrderId: null, createdAt: now - day * 1, updatedAt: now - day * 1 }
+  ]
+
+  // 修复室账：按册开工单，记领了哪几册、拆下多少书叶、修好还回几册
+  const workOrders: WorkOrder[] = [
+    { id: 'wo_01', orderNo: '修字 001', caseId: 'case_01', volumeIds: ['vol_0101'], removedLeafCount: 5, returnedVolumeIds: [], state: 'open', checkoutId: 'chk_01', createdAt: now - day * 5, updatedAt: now - day * 3 }
+  ]
+
   await db.transaction(
     'rw',
-    [db.books, db.volumes, db.leaves, db.papers, db.repairOrders, db.bindings],
+    [db.books, db.volumes, db.leaves, db.papers, db.repairOrders, db.bindings, db.caseShelves, db.checkoutRequests, db.workOrders, db.reconReports],
     async () => {
       await db.books.bulkPut(books)
       await db.volumes.bulkPut(volumes)
@@ -240,6 +318,9 @@ export async function seedDatabase(): Promise<void> {
       await db.papers.bulkPut(papers)
       await db.repairOrders.bulkPut(repairOrders)
       await db.bindings.bulkPut(bindings)
+      await db.caseShelves.bulkPut(caseShelves)
+      await db.checkoutRequests.bulkPut(checkoutRequests)
+      await db.workOrders.bulkPut(workOrders)
     }
   )
 }
@@ -256,17 +337,27 @@ export interface RestoreSnapshot {
   papers: Paper[]
   repairOrders: RepairOrder[]
   bindings: Binding[]
+  /** v3 新增四表；旧版备份没有这些字段，导入时按空集合处理并回填历史格位 */
+  caseShelves?: CaseShelf[]
+  checkoutRequests?: CheckoutRequest[]
+  workOrders?: WorkOrder[]
+  reconReports?: ReconReport[]
 }
 
 export async function exportSnapshot(): Promise<RestoreSnapshot> {
-  const [books, volumes, leaves, papers, repairOrders, bindings] = await Promise.all([
-    db.books.toArray(),
-    db.volumes.toArray(),
-    db.leaves.toArray(),
-    db.papers.toArray(),
-    db.repairOrders.toArray(),
-    db.bindings.toArray()
-  ])
+  const [books, volumes, leaves, papers, repairOrders, bindings, caseShelves, checkoutRequests, workOrders, reconReports] =
+    await Promise.all([
+      db.books.toArray(),
+      db.volumes.toArray(),
+      db.leaves.toArray(),
+      db.papers.toArray(),
+      db.repairOrders.toArray(),
+      db.bindings.toArray(),
+      db.caseShelves.toArray(),
+      db.checkoutRequests.toArray(),
+      db.workOrders.toArray(),
+      db.reconReports.toArray()
+    ])
   return {
     app: DB_NAME,
     schemaVersion: DB_VERSION,
@@ -276,7 +367,11 @@ export async function exportSnapshot(): Promise<RestoreSnapshot> {
     leaves,
     papers,
     repairOrders,
-    bindings
+    bindings,
+    caseShelves,
+    checkoutRequests,
+    workOrders,
+    reconReports
   }
 }
 
@@ -285,7 +380,7 @@ export function validateSnapshot(input: unknown): string {
   if (typeof input !== 'object' || input === null) return '文件内容不是合法的 JSON 对象'
   const snapshot = input as Partial<RestoreSnapshot>
   if (snapshot.app !== DB_NAME) return `备份文件不属于本项目（app=${String(snapshot.app)}）`
-  const keys: Array<keyof RestoreSnapshot> = [
+  const requiredKeys: Array<keyof RestoreSnapshot> = [
     'books',
     'volumes',
     'leaves',
@@ -293,16 +388,31 @@ export function validateSnapshot(input: unknown): string {
     'repairOrders',
     'bindings'
   ]
-  for (const key of keys) {
+  for (const key of requiredKeys) {
     if (!Array.isArray(snapshot[key])) return `备份文件缺少 ${String(key)} 集合`
+  }
+  const optionalKeys: Array<keyof RestoreSnapshot> = [
+    'caseShelves',
+    'checkoutRequests',
+    'workOrders',
+    'reconReports'
+  ]
+  for (const key of optionalKeys) {
+    const value = snapshot[key]
+    if (value !== undefined && !Array.isArray(value)) return `备份文件 ${String(key)} 集合格式不正确`
   }
   return ''
 }
 
 export async function importSnapshot(snapshot: RestoreSnapshot): Promise<void> {
+  // 旧版备份没有函：按函现有的册数回填一份历史格位
+  const caseShelves =
+    snapshot.caseShelves && snapshot.caseShelves.length > 0
+      ? snapshot.caseShelves
+      : buildLegacyCaseShelves(snapshot.books, snapshot.volumes)
   await db.transaction(
     'rw',
-    [db.books, db.volumes, db.leaves, db.papers, db.repairOrders, db.bindings],
+    [db.books, db.volumes, db.leaves, db.papers, db.repairOrders, db.bindings, db.caseShelves, db.checkoutRequests, db.workOrders, db.reconReports],
     async () => {
       await Promise.all([
         db.books.clear(),
@@ -310,7 +420,11 @@ export async function importSnapshot(snapshot: RestoreSnapshot): Promise<void> {
         db.leaves.clear(),
         db.papers.clear(),
         db.repairOrders.clear(),
-        db.bindings.clear()
+        db.bindings.clear(),
+        db.caseShelves.clear(),
+        db.checkoutRequests.clear(),
+        db.workOrders.clear(),
+        db.reconReports.clear()
       ])
       await db.books.bulkPut(snapshot.books)
       await db.volumes.bulkPut(snapshot.volumes)
@@ -318,6 +432,10 @@ export async function importSnapshot(snapshot: RestoreSnapshot): Promise<void> {
       await db.papers.bulkPut(snapshot.papers)
       await db.repairOrders.bulkPut(snapshot.repairOrders)
       await db.bindings.bulkPut(snapshot.bindings)
+      await db.caseShelves.bulkPut(caseShelves)
+      await db.checkoutRequests.bulkPut(snapshot.checkoutRequests ?? [])
+      await db.workOrders.bulkPut(snapshot.workOrders ?? [])
+      await db.reconReports.bulkPut(snapshot.reconReports ?? [])
     }
   )
 }
@@ -325,7 +443,7 @@ export async function importSnapshot(snapshot: RestoreSnapshot): Promise<void> {
 export async function clearAllTables(): Promise<void> {
   await db.transaction(
     'rw',
-    [db.books, db.volumes, db.leaves, db.papers, db.repairOrders, db.bindings],
+    [db.books, db.volumes, db.leaves, db.papers, db.repairOrders, db.bindings, db.caseShelves, db.checkoutRequests, db.workOrders, db.reconReports],
     async () => {
       await Promise.all([
         db.books.clear(),
@@ -333,7 +451,11 @@ export async function clearAllTables(): Promise<void> {
         db.leaves.clear(),
         db.papers.clear(),
         db.repairOrders.clear(),
-        db.bindings.clear()
+        db.bindings.clear(),
+        db.caseShelves.clear(),
+        db.checkoutRequests.clear(),
+        db.workOrders.clear(),
+        db.reconReports.clear()
       ])
     }
   )
@@ -345,26 +467,32 @@ export async function resetDatabase(): Promise<void> {
 }
 
 export async function countAll(): Promise<Record<string, number>> {
-  const [books, volumes, leaves, papers, repairOrders, bindings] = await Promise.all([
-    db.books.count(),
-    db.volumes.count(),
-    db.leaves.count(),
-    db.papers.count(),
-    db.repairOrders.count(),
-    db.bindings.count()
-  ])
-  return { books, volumes, leaves, papers, repairOrders, bindings }
+  const [books, volumes, leaves, papers, repairOrders, bindings, caseShelves, checkoutRequests, workOrders, reconReports] =
+    await Promise.all([
+      db.books.count(),
+      db.volumes.count(),
+      db.leaves.count(),
+      db.papers.count(),
+      db.repairOrders.count(),
+      db.bindings.count(),
+      db.caseShelves.count(),
+      db.checkoutRequests.count(),
+      db.workOrders.count(),
+      db.reconReports.count()
+    ])
+  return { books, volumes, leaves, papers, repairOrders, bindings, caseShelves, checkoutRequests, workOrders, reconReports }
 }
 
-/** 级联删除古籍 → 册次 → 书叶 → 补纸 / 工序 / 装订 */
+/** 级联删除古籍 → 册次 → 书叶 → 补纸 / 工序 / 装订 → 函 → 出库请求 / 工单 / 重报 */
 export async function removeBookCascade(bookId: string): Promise<void> {
   const volumeIds = (await db.volumes.where('bookId').equals(bookId).toArray()).map((row) => row.id)
   const leafIds = volumeIds.length
     ? (await db.leaves.where('volumeId').anyOf(volumeIds).toArray()).map((row) => row.id)
     : []
+  const caseIds = (await db.caseShelves.where('bookId').equals(bookId).toArray()).map((row) => row.id)
   await db.transaction(
     'rw',
-    [db.books, db.volumes, db.leaves, db.papers, db.repairOrders, db.bindings],
+    [db.books, db.volumes, db.leaves, db.papers, db.repairOrders, db.bindings, db.caseShelves, db.checkoutRequests, db.workOrders, db.reconReports],
     async () => {
       if (leafIds.length > 0) {
         await db.papers.where('leafId').anyOf(leafIds).delete()
@@ -374,23 +502,38 @@ export async function removeBookCascade(bookId: string): Promise<void> {
         await db.leaves.where('volumeId').anyOf(volumeIds).delete()
         await db.bindings.where('volumeId').anyOf(volumeIds).delete()
       }
+      if (caseIds.length > 0) {
+        await db.checkoutRequests.where('caseId').anyOf(caseIds).delete()
+        await db.workOrders.where('caseId').anyOf(caseIds).delete()
+        await db.reconReports.where('caseId').anyOf(caseIds).delete()
+        await db.caseShelves.where('bookId').equals(bookId).delete()
+      }
       await db.volumes.where('bookId').equals(bookId).delete()
       await db.books.delete(bookId)
     }
   )
 }
 
-/** 级联删除册次 → 书叶 → 补纸 / 工序 / 装订 */
+/** 级联删除册次 → 书叶 → 补纸 / 工序 / 装订；工单领取 / 还回清单同步剔除该册 */
 export async function removeVolumeCascade(volumeId: string): Promise<void> {
   const leafIds = (await db.leaves.where('volumeId').equals(volumeId).toArray()).map((row) => row.id)
+  const affectedOrders = (await db.workOrders.toArray())
+    .filter((order) => order.volumeIds.includes(volumeId) || order.returnedVolumeIds.includes(volumeId))
+    .map((order) => ({
+      ...order,
+      volumeIds: order.volumeIds.filter((id) => id !== volumeId),
+      returnedVolumeIds: order.returnedVolumeIds.filter((id) => id !== volumeId),
+      updatedAt: Date.now()
+    }))
   await db.transaction(
     'rw',
-    [db.volumes, db.leaves, db.papers, db.repairOrders, db.bindings],
+    [db.volumes, db.leaves, db.papers, db.repairOrders, db.bindings, db.workOrders],
     async () => {
       if (leafIds.length > 0) {
         await db.papers.where('leafId').anyOf(leafIds).delete()
         await db.repairOrders.where('leafId').anyOf(leafIds).delete()
       }
+      if (affectedOrders.length > 0) await db.workOrders.bulkPut(affectedOrders)
       await db.leaves.where('volumeId').equals(volumeId).delete()
       await db.bindings.where('volumeId').equals(volumeId).delete()
       await db.volumes.delete(volumeId)

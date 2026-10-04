@@ -5,11 +5,13 @@
  */
 import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { Brush, Document, Files, Reading, Tools } from '@element-plus/icons-vue'
+import { Box, Brush, Document, Files, Reading, Tickets, Tools } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { useBookStore } from '@/stores/bookStore'
 import { useLeafStore } from '@/stores/leafStore'
 import { useRepairStore } from '@/stores/repairStore'
+import { useWarehouseStore } from '@/stores/warehouseStore'
+import { useWorkshopStore } from '@/stores/workshopStore'
 import { initDatabase } from '@/utils/db'
 import { useLeafStats } from '@/hooks/useLeafStats'
 
@@ -18,13 +20,22 @@ const router = useRouter()
 const bookStore = useBookStore()
 const leafStore = useLeafStore()
 const repairStore = useRepairStore()
+const warehouseStore = useWarehouseStore()
+const workshopStore = useWorkshopStore()
 const { totals } = useLeafStats()
 const ready = ref(false)
 
 onMounted(async () => {
   try {
     await initDatabase()
-    await Promise.all([bookStore.loadBooks(), bookStore.loadVolumes(), leafStore.loadLeaves(), repairStore.loadOrders()])
+    await Promise.all([
+      bookStore.loadBooks(),
+      bookStore.loadVolumes(),
+      leafStore.loadLeaves(),
+      repairStore.loadOrders(),
+      warehouseStore.loadAll(),
+      workshopStore.loadOrders()
+    ])
   } catch (error) {
     ElMessage.error(`本地数据库初始化失败：${error instanceof Error ? error.message : '未知错误'}`)
   } finally {
@@ -42,6 +53,20 @@ const navItems = computed(() => {
       icon: Document,
       badge: String(leafStore.leaves.length),
       disabled: !bookId
+    },
+    {
+      path: '/warehouse',
+      label: '库房架位',
+      icon: Box,
+      badge: warehouseStore.queuedRequests.length > 0 ? String(warehouseStore.queuedRequests.length) : '',
+      disabled: false
+    },
+    {
+      path: '/workshop',
+      label: '修复工单',
+      icon: Tickets,
+      badge: workshopStore.openOrders.length > 0 ? String(workshopStore.openOrders.length) : '',
+      disabled: false
     },
     { path: '/papers', label: '补纸选配', icon: Brush, badge: '', disabled: false },
     { path: '/repairs', label: '修复工序', icon: Tools, badge: String(repairStore.totalSteps), disabled: false },
